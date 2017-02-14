@@ -17,6 +17,7 @@
  *******************************************************************************/
 package com.oneops.opamp.service;
 
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang.StringUtils;
@@ -28,6 +29,7 @@ import com.oneops.antenna.domain.NotificationSeverity;
 import com.oneops.antenna.domain.NotificationType;
 import com.oneops.cms.cm.domain.CmsCI;
 import com.oneops.cms.cm.domain.CmsCIAttribute;
+import com.oneops.cms.cm.domain.CmsCIRelation;
 import com.oneops.cms.cm.service.CmsCmProcessor;
 import com.oneops.opamp.util.EventUtil;
 import com.oneops.ops.events.CiChangeStateEvent;
@@ -61,6 +63,8 @@ public class Notifications {
 	protected static final String CI_NAME = "ciName";
 
 	protected static final String EVENT_NAME = "eventName";
+	
+	private static final String MANAGED_VIA_IP = "IP";
 
 	protected static final String REPAIR_IN_PROGRESS = "Starting repair";
 
@@ -83,6 +87,9 @@ public class Notifications {
     protected static final String SUBJECT_SUFFIX_OPEN_EVENT = " is violated.";
 
     protected static final String SUBJECT_SUFFIX_CLOSE_EVENT = " recovered.";
+
+	private static final String CI_IN_DEFUNCT_STATE_NOTIFICATION = "This component is in defunct state. Trying to auto-replace.";
+
 
     private ReliableExecutor<NotificationMessage> antennaClient;
 	private CmsCmProcessor cmProcessor;
@@ -142,6 +149,8 @@ public class Notifications {
 			notify.putPayloadEntry(METRICS, gson.toJson(oEvent.getMetrics()));	
 		}
 		
+		addIpToNotification(ci, notify);
+		
 		if (payloadEntries != null && payloadEntries.size() > 0) {
 			notify.putPayloadEntries(payloadEntries);
 		}
@@ -168,7 +177,8 @@ public class Notifications {
 			notify.setAdminStatus(envCi.getAttribute(ADMINSTATUS_ATTRIBUTE_NAME).getDfValue());
 		}
 		notify.setManifestCiId(oEvent.getManifestId());
-
+		String subjectPrefix = NotificationMessage.buildSubjectPrefix(ci.getNsPath());
+		
 		if (oEvent.getState().equalsIgnoreCase("open")) {
             if (severity == null){
                 notify.setSeverity(NotificationSeverity.warning);
@@ -176,9 +186,9 @@ public class Notifications {
                 notify.setSeverity(severity);
             }
             if (StringUtils.isNotEmpty(subject)) {
-            	notify.setSubject(subject);
+            	notify.setSubject(subjectPrefix + subject);
             } else {
-            	notify.setSubject(oEvent.getName()+  SUBJECT_SUFFIX_OPEN_EVENT);	
+            	notify.setSubject(subjectPrefix + oEvent.getName()+  SUBJECT_SUFFIX_OPEN_EVENT);	
             }
             
 			//subject = <monitorName:[threshold_name|heartbeat]> [is violated|recovered]
@@ -192,9 +202,9 @@ public class Notifications {
     		// close events go on INFO
 			notify.setSeverity(NotificationSeverity.info);
             if (StringUtils.isNotEmpty(subject)) {
-            	notify.setSubject(subject);
+            	notify.setSubject(subjectPrefix + subject);
             } else {
-            	notify.setSubject(oEvent.getName()+ SUBJECT_SUFFIX_CLOSE_EVENT);
+            	notify.setSubject(subjectPrefix + oEvent.getName()+ SUBJECT_SUFFIX_CLOSE_EVENT);
             }
             if (StringUtils.isNotEmpty(text)) {
             	notify.setText(text);
@@ -214,6 +224,28 @@ public class Notifications {
 
 		antennaClient.executeAsync(notify);
 		return notify;
+	}
+
+	private void addIpToNotification(CmsCI ci, NotificationMessage notificationMessage) {
+		// First check if the ci is a compute
+		CmsCIAttribute attribute = ci.getAttribute("private_ip");
+		if (attribute == null) {
+			attribute = ci.getAttribute("public_ip");
+		}
+
+		if (attribute == null && !envProcessor.excludeIpInNotifications()) { // The ci is not a compute. Find its managed-via compute
+			List<CmsCIRelation> relations = cmProcessor.getFromCIRelations(ci.getCiId(), "bom.ManagedVia", null, null);
+			if (relations != null && relations.size() > 0) {
+				CmsCI computeCi = relations.get(0).getToCi();
+				attribute = computeCi.getAttribute("private_ip");
+				if (attribute == null || StringUtils.isEmpty(attribute.getDfValue())) {
+					attribute = computeCi.getAttribute("public_ip");
+				}
+			}
+		}
+		if (attribute != null && StringUtils.isNotEmpty(attribute.getDfValue())) {
+			notificationMessage.putPayloadEntry(MANAGED_VIA_IP, attribute.getDfValue());
+		}
 	}
 
 	/**
@@ -652,5 +684,9 @@ public class Notifications {
 
 	public void setEnvProcessor(EnvPropsProcessor envProcessor) {
 		this.envProcessor = envProcessor;
+	}
+
+	public NotificationMessage sendDefunctNotification(CiChangeStateEvent event) {
+		return sendOpsEventNotification(event, CI_IN_DEFUNCT_STATE_NOTIFICATION, NotificationSeverity.warning);		
 	}
 }
